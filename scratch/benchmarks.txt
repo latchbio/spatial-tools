@@ -1,0 +1,10 @@
+Complete:
+
+1. original (tile-wise Z, x, y nested loops), no caching:
+5670.0s
+
+
+Partials:
+1. original
+Total runtime: 108.8s
+z=0: 108.8s

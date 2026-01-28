@@ -1,0 +1,189 @@
+[project]
+name = "spatial-tools"
+version = "0.1.2"
+description = ""
+requires-python = "==3.11.*"
+dependencies = [
+    "duckdb>=1.2.2",
+    "pandas>=2.2.3",
+    "pillow>=11.2.1",
+    "py-spy>=0.4.0",
+    "tables>=3.10.2",
+    "tqdm>=4.67.1",
+    "anndata>=0.11.1",
+    "numpy>=2.2.2",
+    "opencv-python>=4.11.0.86",
+    "pyarrow>=20.0.0",
+    "geopandas>=1.1.0",
+    "tifffile>=2025.9.30",
+    "imagecodecs>=2025.8.2",
+    "scanpy>=1.11.5",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = [
+    "ipykernel>=7.1.0",
+    "matplotlib>=3.10.7",
+    "ruff>=0.9.5",
+]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+preview = true
+
+pydocstyle = { convention = "google" }
+extend-select = [
+    "F",
+    "E",
+    "W",
+    # "C90",
+    "I",
+    "N",
+    "D",
+    "UP",
+    "YTT",
+    "ANN",
+    "ASYNC",
+    "ASYNC1",
+    "S",
+    # "BLE", # `raise x from y` does not work
+    "FBT",
+    "B",
+    "A",
+    # "COM",
+    # "CPY",
+    "C4",
+    "DTZ",
+    "T10",
+    "DJ",
+    # "EM",
+    "EXE",
+    "FA",
+    "ISC",
+    "ICN",
+    "G",
+    "INP",
+    "PIE",
+    "T20",
+    "PYI",
+    "PT",
+    "Q",
+    "RSE",
+    "RET",
+    "SLF",
+    "SLOT",
+    "SIM",
+    "TID",
+    "TCH",
+    "INT",
+    "ARG",
+    "PTH",
+    "TD",
+    # "FIX",
+    # "ERA",
+    "PD",
+    "PGH",
+    "PL",
+    "TRY",
+    "FLY",
+    "NPY",
+    "AIR",
+    "PERF",
+    "FURB",
+    "LOG",
+    "RUF",
+]
+ignore = [
+    "A002",
+    "A003",
+
+    "ANN101",
+    "ANN102",
+
+    "E402",
+    "E501",
+    "E741",
+
+    "C408",
+    "C901",
+
+    "T201",
+    "T203",
+
+    "D415",
+
+    "SIM108",
+
+    "S101",
+    "S603",
+
+    "N807",
+
+    "D100",
+    "D101",
+    "D102",
+    "D103",
+    "D104",
+    "D105",
+    "D106",
+    "D107",
+
+    "TRY003",
+    "TRY300",
+    "TRY301",
+
+    "FLY002",
+
+    "PLW2901",
+    "PLW0603",
+
+    "PLR0904",
+    "PLR0911",
+    "PLR0912",
+    "PLR0913",
+    "PLR0914",
+    "PLR0915",
+    "PLR0916",
+    "PLR0917",
+    "PLR1702",
+    "PLR2004",
+
+    "TD001",
+    "TD003",
+    "TD006",
+
+    "TID252",
+
+    "PD901",
+
+    # todo(maximsmol): reenable as soon as data-validation can support the `type` syntax
+    "UP040",
+
+    "SIM112",
+
+    "PLC1901",
+
+    "TCH002",
+    "TC006",
+
+    "PGH003", # todo(maximsmol): pyright ignores everything regardless of code
+]
+
+[tool.ruff.format]
+preview = true
+skip-magic-trailing-comma = true
+
+[tool.pyright]
+reportUnknownArgumentType = "none"
+reportUnknownLambdaType = "none"
+reportUnknownMemberType = "none"
+reportUnknownParameterType = "none"
+reportUnknownVariableType = "none"
+
+reportUnusedImport = "warning"

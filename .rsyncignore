@@ -1,0 +1,7 @@
+/.venv
+/.git
+/.rsyncignore
+/stitched
+
+-p __pycache__
+-p *.pyc

@@ -1,0 +1,5 @@
+napari_cosmx/
+__pycache__/
+/data
+stitched*
+.DS_Store
