@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal
 
 import PIL
 from PIL import Image
+import pyvips
 
 from .rect import Fov, Rect
 from .vec2 import Vec2
@@ -66,9 +67,6 @@ def iterate_tiles(ctx: "Ctx") -> Generator[Tile]:
                 yield Tile(ctx=ctx, z=z, pos_idx=Vec2(x, y))
 
 
-# todo(maximsmol): try pyvips
-
-
 # todo(maximsmol): webp-compress every FOV first?
 # todo(maximsmol): doing this inside-out is probably better
 # i.e. loop over each fov and add it to each zoom tile that requires it
@@ -76,47 +74,18 @@ def iterate_tiles(ctx: "Ctx") -> Generator[Tile]:
 # todo(maximsmol): iterate over Z levels first and cache the open FOV images?
 # todo(maximsmol): stitch from high Z to low, reusing previous levels as thumbnails
 
-_cached_fov_imgs: dict[str, Image.Image] = {}
-_cached_zoom: int | None = None
-_cached_category: str | None = None
-
-
-@contextmanager
-def load_image(path: Path) -> Generator[Image.Image]:
-    try:
-        with Image.open(path) as img:
-            yield img
-            return
-    except PIL.UnidentifiedImageError:
-        import tifffile  # noqa: PLC0415
-
-        data = tifffile.imread(path)
-        yield Image.fromarray(data)
-        return
-
 
 def _get_cached_fov_img(tile: Tile, fov: Fov, *, category: str) -> Image.Image:
-    global _cached_zoom, _cached_category
+    img = pyvips.Image.new_from_file(fov.paths[category])
 
-    if _cached_zoom != tile.z or _cached_category != category:
-        _cached_fov_imgs.clear()
-        _cached_zoom = tile.z
-        _cached_category = category
+    target_size = tile.fov_size_spx(fov)
+    img = img.resize(
+        target_size.x / img.width,
+        vscale=target_size.y / img.height,
+        kernel=pyvips.Kernel.NEAREST,
+    )
 
-    img = _cached_fov_imgs.get(fov.id)
-    if img is not None:
-        return img
-
-    image_path = fov.paths[category]
-
-    with load_image(image_path) as fov_img:
-        fov_img = fov_img.resize(
-            tile.fov_size_spx(fov).to_tuple(), resample=Image.Resampling.NEAREST
-        )
-
-        _cached_fov_imgs[fov.id] = fov_img.copy()
-
-    return _cached_fov_imgs[fov.id]
+    return img
 
 
 def write_tile(
@@ -131,40 +100,47 @@ def write_tile(
     start = time.monotonic()
     ctx.log(f"z={tile.z} x={tile.pos_idx.x} y={tile.pos_idx.y} @ {tile}")
 
-    with Image.new(color_mode, tile.resolution().to_tuple()) as res:
-        total_fovs = 0
-        for fov in ctx.fovs:
-            if not tile.overlaps(fov):
-                continue
-            total_fovs += 1
+    res_size = tile.resolution()
+    channel = pyvips.Image.black(res_size.x, res_size.y)
+    res = channel.bandjoin([channel, channel])
+    # todo(maximsmol): support color_mode
 
-        fov_pct = total_fovs / len(ctx.fovs)
-        ctx.log(f"  Using {total_fovs}/{len(ctx.fovs)} FOVs ({fov_pct * 100:.2f}%)")
+    total_fovs = 0
+    for fov in ctx.fovs:
+        if not tile.overlaps(fov):
+            continue
+        total_fovs += 1
 
-        i = 0
-        for fov in ctx.fovs:
-            if not tile.overlaps(fov):
-                continue
+    fov_pct = total_fovs / len(ctx.fovs)
+    ctx.log(f"  Using {total_fovs}/{len(ctx.fovs)} FOVs ({fov_pct * 100:.2f}%)")
 
-            box_pos_spx = tile.fov_pos_spx(fov)
+    i = 0
+    for fov in ctx.fovs:
+        if not tile.overlaps(fov):
+            continue
 
-            progress_pct = i / total_fovs
-            ctx.log(
-                f"  {i}/{total_fovs} ({progress_pct * 100:.2f}%): {box_pos_spx.x}px, {box_pos_spx.y}px <- FOV {fov.id} @ {fov.pos_str()}"
-            )
-            i += 1
+        box_pos_spx = tile.fov_pos_spx(fov)
 
-            fov_img = _get_cached_fov_img(tile, fov, category=category)
-            res.paste(fov_img, box=box_pos_spx.to_tuple())
+        progress_pct = i / total_fovs
+        ctx.log(
+            f"  {i}/{total_fovs} ({progress_pct * 100:.2f}%): {box_pos_spx.x}px, {box_pos_spx.y}px <- FOV {fov.id} @ {fov.pos_str()}"
+        )
+        i += 1
 
-        if color_mode == "I;16" and rescale is not None:
-            lo, hi = rescale.to_tuple()
-            res = res.convert("I").point(
-                [(x - lo) / (hi - lo) * 255 for x in range(256 * 256)], "L"
-            )
+        fov_img = _get_cached_fov_img(tile, fov, category=category)
+        res = res.insert(fov_img, box_pos_spx.x, box_pos_spx.y)
+        del fov_img
 
-        res_p = out_dir / f"{tile.z}/{tile.pos_idx.x}-{tile.pos_idx.y}.webp"
-        res_p.parent.mkdir(parents=True, exist_ok=True)
-        res.save(res_p, format="webp")
+    # if color_mode == "I;16" and rescale is not None:
+    #     lo, hi = rescale.to_tuple()
+    #     res = res.convert("I").point(
+    #         [(x - lo) / (hi - lo) * 255 for x in range(256 * 256)], "L"
+    #     )
 
-        ctx.log(f"  Time {time.monotonic() - start:.1f}s")
+    res_p = out_dir / f"{tile.z}/{tile.pos_idx.x}-{tile.pos_idx.y}.webp"
+    res_p.parent.mkdir(parents=True, exist_ok=True)
+
+    res.write_to_file(res_p)
+    del res
+
+    ctx.log(f"  Time {time.monotonic() - start:.1f}s")
