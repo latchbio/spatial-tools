@@ -1,6 +1,6 @@
 [project]
 name = "spatial-tools"
-version = "0.1.2"
+version = "0.1.2+pyvips"
 description = ""
 requires-python = "==3.11.*"
 dependencies = [
