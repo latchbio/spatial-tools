@@ -102,7 +102,10 @@ def write_tile(
 
     res_size = tile.resolution()
     channel = pyvips.Image.black(res_size.x, res_size.y)
-    res = channel.bandjoin([channel, channel])
+    if color_mode == "I;16":
+        res = channel.cast(pyvips.BandFormat.USHORT)
+    else:
+        res = channel.bandjoin([channel, channel])
     # todo(maximsmol): support color_mode
 
     total_fovs = 0
@@ -128,9 +131,14 @@ def write_tile(
         i += 1
 
         fov_img = _get_cached_fov_img(tile, fov, category=category)
+        if fov_img.hasalpha():
+            fov_img = fov_img.flatten()
+
+        # todo(maximsmol): use arrayjoin?
         res = res.insert(fov_img, box_pos_spx.x, box_pos_spx.y)
         del fov_img
 
+    # todo(maximsmol): implement
     # if color_mode == "I;16" and rescale is not None:
     #     lo, hi = rescale.to_tuple()
     #     res = res.convert("I").point(
