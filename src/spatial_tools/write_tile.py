@@ -7,6 +7,7 @@ from math import ceil, floor
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+import numpy as np
 import PIL
 from PIL import Image
 
@@ -81,6 +82,25 @@ _cached_zoom: int | None = None
 _cached_category: str | None = None
 
 
+def _ome_tiff_to_2d(data: np.ndarray) -> np.ndarray:
+    """Reduce OME-TIFF / multi-dim array to 2D (Y, X) for display."""
+    data = np.asarray(data)
+    if data.ndim == 2:
+        return data
+    if data.ndim == 1:
+        return data.reshape(1, -1)
+    # 3+ D: use the two largest dimensions as spatial (Y, X), max over the rest.
+    shape = data.shape
+    axes_by_size = sorted(range(data.ndim), key=lambda i: shape[i], reverse=True)
+    keep_axes = tuple(axes_by_size[:2])
+    max_axes = tuple(i for i in range(data.ndim) if i not in keep_axes)
+    out = data.max(axis=max_axes)
+    # Ensure order (Y, X) = (height, width); keep_axes may be (2,1) for (Z,Y,X).
+    if keep_axes[0] > keep_axes[1]:
+        out = np.swapaxes(out, 0, 1)
+    return out
+
+
 @contextmanager
 def load_image(path: Path) -> Generator[Image.Image]:
     try:
@@ -90,8 +110,16 @@ def load_image(path: Path) -> Generator[Image.Image]:
     except PIL.UnidentifiedImageError:
         import tifffile  # noqa: PLC0415
 
+        # Fall back to tifffile for OME-TIFF and other complex TIFFs.
         data = tifffile.imread(path)
-        yield Image.fromarray(data)
+        data = _ome_tiff_to_2d(data)
+        if np.issubdtype(data.dtype, np.floating):
+            data = (np.clip(data, 0, 1) * 65535).astype(np.uint16)
+        elif data.dtype != np.uint16 and np.issubdtype(data.dtype, np.integer):
+            data = np.clip(data, 0, 65535).astype(np.uint16)
+        # Use mode "I" (32-bit signed int) so paste() works reliably.
+        img = Image.fromarray(data.astype(np.int32), mode="I")
+        yield img
         return
 
 
@@ -131,7 +159,9 @@ def write_tile(
     start = time.monotonic()
     ctx.log(f"z={tile.z} x={tile.pos_idx.x} y={tile.pos_idx.y} @ {tile}")
 
-    with Image.new(color_mode, tile.resolution().to_tuple()) as res:
+    # Use "I" (32-bit int) internally for 16-bit sources so paste() is reliable.
+    canvas_mode = "I" if color_mode == "I;16" else color_mode
+    with Image.new(canvas_mode, tile.resolution().to_tuple()) as res:
         total_fovs = 0
         for fov in ctx.fovs:
             if not tile.overlaps(fov):
@@ -157,11 +187,19 @@ def write_tile(
             fov_img = _get_cached_fov_img(tile, fov, category=category)
             res.paste(fov_img, box=box_pos_spx.to_tuple())
 
-        if color_mode == "I;16" and rescale is not None:
-            lo, hi = rescale.to_tuple()
-            res = res.convert("I").point(
-                [(x - lo) / (hi - lo) * 255 for x in range(256 * 256)], "L"
-            )
+        if color_mode == "I;16":
+            lo, hi = rescale.to_tuple() if rescale is not None else (0, 65535)
+            if hi <= lo:
+                lo, hi = 0, 65535
+            lut = [
+                int(max(0, min(255, (x - lo) / (hi - lo) * 255)))
+                for x in range(256 * 256)
+            ]
+            res = res.point(lut, "L")
+
+        # Always save as RGB so viewers that expect 3-channel tiles work correctly.
+        if res.mode != "RGB":
+            res = res.convert("RGB")
 
         res_p = out_dir / f"{tile.z}/{tile.pos_idx.x}-{tile.pos_idx.y}.webp"
         res_p.parent.mkdir(parents=True, exist_ok=True)

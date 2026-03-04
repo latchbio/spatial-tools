@@ -1,4 +1,4 @@
-from tifffile import TiffFile
+from tifffile import TiffFile, imread as tiff_imread
 import json
 import numpy as np
 from typing import cast
@@ -12,9 +12,10 @@ from .args import XeniumArguments
 from .ctx import Ctx
 from .rect import Fov
 from .vec2 import Vec2
-from .write_tile import Tile
+from .write_tile import Tile, _ome_tiff_to_2d
 
 # https://www.10xgenomics.com/support/software/xenium-onboard-analysis/latest/analysis/xoa-output-understanding-outputs
+
 
 def populate_ctx(ctx: Ctx, args: XeniumArguments) -> None:
     meta = json.loads((args.input / "experiment.xenium").read_text())
@@ -28,36 +29,57 @@ def populate_ctx(ctx: Ctx, args: XeniumArguments) -> None:
     else:
         ctx.log("Listing images")
 
-    fov: Fov | None = None
-    for cat, subpath in [
-        # todo(maximsmol)
-        # ("z_levels", meta["images"]["morphology_filepath"]),
-        ("mip", meta["images"]["morphology_mip_filepath"]),
-        ("focus", meta["images"]["morphology_focus_filepath"]),
-    ]:
-        img_p = args.input / subpath
-        with TiffFile(img_p) as img:
-            ctx.log(f"{cat}: {subpath}")
-            if not args.no_rescale:
-                data = img.pages[0].asarray()
-                cur_np = np.quantile(data, [0.05, 0.95])
-                ctx.quantiles[cat] = Vec2(cast(int, cur_np[0]), cast(int, cur_np[1]))
-                ctx.log(f"  Data range: {ctx.quantiles[cat].x}-{ctx.quantiles[cat].y}")
+    # Newer Xenium runs can omit `morphology_mip_filepath` and only provide
+    # `morphology_filepath` + `morphology_focus_filepath`. Be flexible and fall
+    # back to `morphology_filepath` as the MIP-equivalent when needed.
+    images = meta.get("images", {})
+    image_specs: list[tuple[str, str]] = []
 
-            sizes = img.pages[0].sizes
-            if fov is not None:
-                assert Vec2(sizes["width"], sizes["height"]) == fov.size_px
-                fov.paths[cat] = img_p
-            else:
-                fov = Fov(
-                    ctx=ctx,
-                    paths={cat: img_p},
-                    id="all",
-                    pos_mm=Vec2(0, 0),
-                    size_px=Vec2(sizes["width"], sizes["height"]),
-                )
+    if "morphology_mip_filepath" in images:
+        image_specs.append(("mip", images["morphology_mip_filepath"]))
+    elif "morphology_filepath" in images:
+        image_specs.append(("mip", images["morphology_filepath"]))
+
+    if "morphology_focus_filepath" in images:
+        image_specs.append(("focus", images["morphology_focus_filepath"]))
+
+    if not image_specs:
+        raise KeyError(
+            "No usable morphology image paths found in experiment.xenium['images']"
+        )
+
+    fov: Fov | None = None
+    for cat, subpath in image_specs:
+        img_p = args.input / subpath
+        ctx.log(f"{cat}: {subpath}")
+        # Use same 2D reduction as write_tile so quantiles and tiling match.
+        data = np.asarray(tiff_imread(img_p))
+        ctx.log(f"  Raw shape: {data.shape} dtype: {data.dtype}")
+        data_2d = _ome_tiff_to_2d(data)
+        ctx.log(
+            f"  2D shape: {data_2d.shape} min: {data_2d.min()} max: {data_2d.max()}"
+        )
+        height_2d, width_2d = data_2d.shape[0], data_2d.shape[1]
+
+        if not args.no_rescale:
+            cur_np = np.quantile(data_2d, [0.05, 0.95])
+            ctx.quantiles[cat] = Vec2(int(cur_np[0]), int(cur_np[1]))
+            ctx.log(f"  Data range: {ctx.quantiles[cat].x}-{ctx.quantiles[cat].y}")
+
+        if fov is not None:
+            assert Vec2(width_2d, height_2d) == fov.size_px
+            fov.paths[cat] = img_p
+        else:
+            fov = Fov(
+                ctx=ctx,
+                paths={cat: img_p},
+                id="all",
+                pos_mm=Vec2(0, 0),
+                size_px=Vec2(width_2d, height_2d),
+            )
 
     ctx.add_fov(fov)
+
 
 def generate_extras(ctx: Ctx, args: XeniumArguments) -> None:
     slide = ctx.fovs[0]
@@ -70,12 +92,11 @@ def generate_extras(ctx: Ctx, args: XeniumArguments) -> None:
         (args.output / "cell_boundaries.duckdb").unlink(missing_ok=True)
 
     con = duckdb.connect(
-        args.output / "cell_boundaries.duckdb"
-        if not args.dryrun
-        else None
+        args.output / "cell_boundaries.duckdb" if not args.dryrun else None
     )
     try:
-        con.sql(f"""
+        con.sql(
+            f"""
             install spatial;
             load spatial;
             drop table if exists cell_boundaries;
@@ -104,8 +125,8 @@ def generate_extras(ctx: Ctx, args: XeniumArguments) -> None:
                 "path": str(args.input / "cell_boundaries.parquet"),
                 "x_mm": slide.pos_mm.x,
                 "y_mm": slide.pos_mm.y,
-                "mm_per_tile_px": mm_per_tile_px
-            }
+                "mm_per_tile_px": mm_per_tile_px,
+            },
         )
     finally:
         con.close()
@@ -115,12 +136,11 @@ def generate_extras(ctx: Ctx, args: XeniumArguments) -> None:
         (args.output / "transcripts.duckdb").unlink(missing_ok=True)
 
     con = duckdb.connect(
-        args.output / "transcripts.duckdb"
-        if not args.dryrun
-        else None
+        args.output / "transcripts.duckdb" if not args.dryrun else None
     )
     try:
-        con.sql(f"""
+        con.sql(
+            f"""
             drop table if exists final_transcripts;
             create table
                 final_transcripts
@@ -144,17 +164,18 @@ def generate_extras(ctx: Ctx, args: XeniumArguments) -> None:
                 "path": str(args.input / "transcripts.parquet"),
                 "x_mm": slide.pos_mm.x,
                 "y_mm": slide.pos_mm.y,
-                "mm_per_tile_px": mm_per_tile_px
-            }
+                "mm_per_tile_px": mm_per_tile_px,
+            },
         )
     finally:
         con.close()
 
     ctx.log("Loading the cell feature matrix")
-    adata = scanpy.read_10x_h5("/data/xenium/Xenium_V1_FFPE_TgCRND8_17_9_months_outs/cell_feature_matrix.h5")
+    adata = scanpy.read_10x_h5(args.input / "cell_feature_matrix.h5")
 
     ctx.log("  Adding spatial coordinates and cell information")
-    data = duckdb.sql("""
+    data = duckdb.sql(
+        """
         select
             cell_id::text
                 as cell_id,
@@ -173,8 +194,8 @@ def generate_extras(ctx: Ctx, args: XeniumArguments) -> None:
             "path": str(args.input / "cells.parquet"),
             "x_mm": slide.pos_mm.x,
             "y_mm": slide.pos_mm.y,
-            "mm_per_tile_px": mm_per_tile_px
-        }
+            "mm_per_tile_px": mm_per_tile_px,
+        },
     ).fetchnumpy()
     # Check order
     assert list(adata.obs_names) == list(data["cell_id"])
@@ -183,30 +204,104 @@ def generate_extras(ctx: Ctx, args: XeniumArguments) -> None:
     adata.obs["Cell Area"] = data["cell_area"]
     adata.obs["Nucelus Area"] = data["nucleus_area"]
 
-    ctx.log("  Adding embeddings")
+    analysis_tar = args.input / "analysis.tar.gz"
+    analysis_dir = args.input / "analysis"
 
-    with tarfile.open(args.input / "analysis.tar.gz") as analysis:
-        ctx.log("    - PCA")
-        data = pd.read_csv(analysis.extractfile("analysis/pca/gene_expression_10_components/projection.csv"), index_col="Barcode")
-        data = data.reindex(adata.obs_names)
-        adata.obsm["PCA"] = np.column_stack((data["PC-1"], data["PC-2"]))
+    if analysis_tar.exists():
+        ctx.log("  Adding embeddings from analysis.tar.gz")
 
-        ctx.log("    - TSNE")
-        data = pd.read_csv(analysis.extractfile("analysis/tsne/gene_expression_2_components/projection.csv"), index_col="Barcode")
-        data = data.reindex(adata.obs_names)
-        adata.obsm["TSNE"] = np.column_stack((data["TSNE-1"], data["TSNE-2"]))
+        with tarfile.open(analysis_tar) as analysis:
+            ctx.log("    - PCA")
+            data = pd.read_csv(
+                analysis.extractfile(
+                    "analysis/pca/gene_expression_10_components/projection.csv"
+                ),
+                index_col="Barcode",
+            )
+            data = data.reindex(adata.obs_names)
+            adata.obsm["PCA"] = np.column_stack((data["PC-1"], data["PC-2"]))
 
-        ctx.log("    - UMAP")
-        data = pd.read_csv(analysis.extractfile("analysis/umap/gene_expression_2_components/projection.csv"), index_col="Barcode")
-        data = data.reindex(adata.obs_names)
-        adata.obsm["UMAP"] = np.column_stack((data["UMAP-1"], data["UMAP-2"]))
+            ctx.log("    - TSNE")
+            data = pd.read_csv(
+                analysis.extractfile(
+                    "analysis/tsne/gene_expression_2_components/projection.csv"
+                ),
+                index_col="Barcode",
+            )
+            data = data.reindex(adata.obs_names)
+            adata.obsm["TSNE"] = np.column_stack((data["TSNE-1"], data["TSNE-2"]))
 
-        clustering_re = re.compile(r"^analysis/clustering/gene_expression_([^/]+)/clusters.csv$")
+            ctx.log("    - UMAP")
+            data = pd.read_csv(
+                analysis.extractfile(
+                    "analysis/umap/gene_expression_2_components/projection.csv"
+                ),
+                index_col="Barcode",
+            )
+            data = data.reindex(adata.obs_names)
+            adata.obsm["UMAP"] = np.column_stack((data["UMAP-1"], data["UMAP-2"]))
+
+            clustering_re = re.compile(
+                r"^analysis/clustering/gene_expression_([^/]+)/clusters.csv$"
+            )
+            kmeans_name_re = re.compile(r"^kmeans_(\d+)_clusters$")
+
+            ctx.log("  Adding clusterings")
+            for x in analysis.getnames():
+                m = clustering_re.match(x)
+                if m is None:
+                    continue
+
+                name = m.group(1)
+                if name == "graphclust":
+                    name = "Graph-based"
+
+                m = kmeans_name_re.match(name)
+                if m is not None:
+                    name = f"K={m.group(1)} K-means Gene Expressions K-means"
+
+                print(f"    - {name}")
+                data = pd.read_csv(analysis.extractfile(x), index_col="Barcode")
+                data = data.reindex(adata.obs_names)
+                adata.obs[name] = pd.Categorical(data["Cluster"])
+
+    elif analysis_dir.is_dir():
+        ctx.log("  Adding embeddings from analysis/ directory")
+
+        # PCA
+        pca_csv = analysis_dir / "pca/gene_expression_10_components/projection.csv"
+        if pca_csv.exists():
+            ctx.log("    - PCA")
+            data = pd.read_csv(pca_csv, index_col="Barcode")
+            data = data.reindex(adata.obs_names)
+            adata.obsm["PCA"] = np.column_stack((data["PC-1"], data["PC-2"]))
+
+        # TSNE
+        tsne_csv = analysis_dir / "tsne/gene_expression_2_components/projection.csv"
+        if tsne_csv.exists():
+            ctx.log("    - TSNE")
+            data = pd.read_csv(tsne_csv, index_col="Barcode")
+            data = data.reindex(adata.obs_names)
+            adata.obsm["TSNE"] = np.column_stack((data["TSNE-1"], data["TSNE-2"]))
+
+        # UMAP
+        umap_csv = analysis_dir / "umap/gene_expression_2_components/projection.csv"
+        if umap_csv.exists():
+            ctx.log("    - UMAP")
+            data = pd.read_csv(umap_csv, index_col="Barcode")
+            data = data.reindex(adata.obs_names)
+            adata.obsm["UMAP"] = np.column_stack((data["UMAP-1"], data["UMAP-2"]))
+
+        # Clustering
+        clustering_re = re.compile(
+            r"^clustering/gene_expression_([^/]+)/clusters\.csv$"
+        )
         kmeans_name_re = re.compile(r"^kmeans_(\d+)_clusters$")
 
         ctx.log("  Adding clusterings")
-        for x in analysis.getnames():
-            m = clustering_re.match(x)
+        for f in analysis_dir.rglob("clustering/gene_expression_*/clusters.csv"):
+            rel = f.relative_to(analysis_dir).as_posix()
+            m = clustering_re.match(rel)
             if m is None:
                 continue
 
@@ -219,9 +314,14 @@ def generate_extras(ctx: Ctx, args: XeniumArguments) -> None:
                 name = f"K={m.group(1)} K-means Gene Expressions K-means"
 
             print(f"    - {name}")
-            data = pd.read_csv(analysis.extractfile(x), index_col="Barcode")
+            data = pd.read_csv(f, index_col="Barcode")
             data = data.reindex(adata.obs_names)
             adata.obs[name] = pd.Categorical(data["Cluster"])
+
+    else:
+        ctx.log(
+            "  analysis.tar.gz or analysis/ not found; skipping embeddings and clustering"
+        )
 
     if not args.dryrun:
         ctx.log("  Saving")
